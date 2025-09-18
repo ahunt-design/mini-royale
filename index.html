@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Mini Royale Lane Battler</title>
+  <style>
+    body { margin: 0; background: #1e1f29; color: #eee; font-family: system-ui, sans-serif; }
+    #ui { position: absolute; top: 10px; left: 10px; display: flex; gap: 8px; align-items: center; }
+    .card { padding: 8px 10px; background: #2e3040; border: 1px solid #555; border-radius: 6px; cursor: pointer; }
+    .card:active { transform: translateY(1px); }
+    #elixirBar { width: 200px; height: 10px; background: #333; border-radius: 6px; overflow: hidden; border: 1px solid #555; }
+    #elixirFill { height: 100%; width: 0%; background: linear-gradient(90deg, #7d4cff, #a58bff); }
+    canvas { display: block; margin: 0 auto; background: #0b0d15; }
+    #log { position: absolute; top: 10px; right: 10px; max-width: 320px; font-size: 12px; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div class="card" data-type="knight" data-cost="3">Knight (3)</div>
+    <div class="card" data-type="archer" data-cost="2">Archer (2)</div>
+    <div id="elixirBar"><div id="elixirFill"></div></div>
+    <div id="elixirText">Elixir: 0/10</div>
+  </div>
+  <div id="log"></div>
+  <canvas id="game" width="960" height="540"></canvas>
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const log = document.getElementById('log');
+    const elixirFill = document.getElementById('elixirFill');
+    const elixirText = document.getElementById('elixirText');
+
+    const G = {
+      laneY: canvas.height * 0.6,
+      ground: canvas.height * 0.7,
+      leftKingX: 80,
+      rightKingX: canvas.width - 80,
+      elixir: 5, maxElixir: 10, elixirRate: 0.6, // per second
+      time: 0, over: false, winner: null
+    };
+
+    function logMsg(msg) {
+      log.textContent = msg + "\n" + log.textContent.slice(0, 400);
+    }
+
+    class Unit {
+      constructor(team, x, y, stats) {
+        Object.assign(this, stats);
+        this.team = team; // 'L' or 'R'
+        this.x = x; this.y = y;
+        this.hp = this.maxHp;
+        this.cd = 0; // attack cooldown
+        this.r = 14;
+      }
+      update(dt, units) {
+        if (this.hp <= 0) return;
+        // Find nearest enemy in range
+        let target = null, td = Infinity;
+        for (const u of units) {
+          if (u === this || u.hp <= 0) continue;
+          if (u.team === this.team) continue;
+          const d = Math.hypot(u.x - this.x, u.y - this.y);
+          if (d < td) { td = d; target = u; }
+        }
+        // Move or attack
+        if (target && td <= this.range) {
+          this.cd -= dt;
+          if (this.cd <= 0) {
+            target.hp -= this.damage;
+            this.cd = 1 / this.attackRate;
+          }
+        } else {
+          const dir = this.team === 'L' ? 1 : -1;
+          this.x += dir * this.speed * dt;
+        }
+        // Win conditions: reach enemy king
+        if (this.team === 'L' && this.x >= G.rightKingX) { G.over = true; G.winner = 'Left'; }
+        if (this.team === 'R' && this.x <= G.leftKingX)  { G.over = true; G.winner = 'Right'; }
+      }
+      draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.fillStyle = this.team === 'L' ? '#49c1ff' : '#ff7d7d';
+        ctx.beginPath(); ctx.arc(0, 0, this.r, 0, Math.PI*2); ctx.fill();
+        // HP bar
+        const w = 28, h = 4, hpRatio = Math.max(0, this.hp / this.maxHp);
+        ctx.fillStyle = '#222'; ctx.fillRect(-w/2, -this.r-10, w, h);
+        ctx.fillStyle = '#4cff87'; ctx.fillRect(-w/2, -this.r-10, w*hpRatio, h);
+        ctx.restore();
+      }
+    }
+
+    const CARDS = {
+      knight: { name: 'Knight', cost: 3, maxHp: 140, damage: 28, attackRate: 1, range: 22, speed: 70 },
+      archer: { name: 'Archer', cost: 2, maxHp: 80, damage: 16, attackRate: 1.2, range: 140, speed: 65 }
+    };
+
+    const units = [];
+    function spawn(team, type, x, y) {
+      const stats = CARDS[type];
+      units.push(new Unit(team, x, y, stats));
+    }
+
+    // Enemy simple AI
+    let aiTimer = 0;
+    function ai(dt) {
+      aiTimer -= dt;
+      if (aiTimer <= 0) {
+        // Prefer archer if player has many melee units
+        const playerFront = units.filter(u => u.team==='L' && u.hp>0).length;
+        const choice = (playerFront > 3 && Math.random() < 0.6) ? 'archer' : (Math.random()<0.5?'knight':'archer');
+        spawn('R', choice, G.rightKingX - 10, G.laneY);
+        aiTimer = 1.8 + Math.random()*1.2;
+      }
+    }
+
+    // Elixir & UI
+    function updateElixir(dt) {
+      G.elixir = Math.min(G.maxElixir, G.elixir + G.elixirRate * dt);
+      const pct = (G.elixir / G.maxElixir) * 100;
+      elixirFill.style.width = pct + '%';
+      elixirText.textContent = 'Elixir: ' + Math.floor(G.elixir) + '/10';
+    }
+
+    // Controls: click a card to arm it, then click lane to place
+    let armedCard = null;
+    document.querySelectorAll('.card').forEach(btn => {
+      btn.addEventListener('click', () => {
+        armedCard = btn.dataset.type;
+        logMsg('Selected: ' + CARDS[armedCard].name);
+      });
+    });
+    canvas.addEventListener('click', (e) => {
+      if (!armedCard) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = G.laneY;
+      const cost = CARDS[armedCard].cost;
+      if (G.elixir >= cost && Math.abs(y - G.laneY) < 40 && x < canvas.width * 0.6) {
+        G.elixir -= cost;
+        spawn('L', armedCard, x, y);
+        armedCard = null;
+      } else {
+        logMsg('Not enough elixir or invalid placement.');
+      }
+    });
+
+    // Game loop
+    let last = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.033, (now - last) / 1000); // clamp delta
+      last = now;
+      if (!G.over) {
+        G.time += dt;
+        updateElixir(dt);
+        ai(dt);
+        for (const u of units) u.update(dt, units);
+      }
+
+      // Draw
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // Arena lane
+      ctx.strokeStyle = '#3a3d52'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(0, G.laneY); ctx.lineTo(canvas.width, G.laneY); ctx.stroke();
+      // Kings
+      ctx.fillStyle = '#49c1ff'; ctx.fillRect(G.leftKingX-18, G.laneY-36, 36, 36);
+      ctx.fillStyle = '#ff7d7d'; ctx.fillRect(G.rightKingX-18, G.laneY-36, 36, 36);
+      // Units
+      for (const u of units) u.draw();
+
+      // Overlay
+      ctx.fillStyle = '#eee'; ctx.font = '14px system-ui';
+      ctx.fillText('Mini Royale Prototype — reach the enemy king to win', 20, 28);
+      if (G.over) {
+        ctx.fillStyle = '#fff';
+        ctx.font = '32px system-ui';
+        ctx.fillText((G.winner || 'Draw') + ' wins!', canvas.width/2 - 80, 80);
+      }
+
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
